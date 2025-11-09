@@ -26,7 +26,8 @@ public:
     MazeGame(int tileSize = 48)
         : tileSize(tileSize), currentLevel(0), score(0),
           levelTimeLimit(40), moving(false), moveSpeed(6.0f),
-          window(0), windowWidth(0), windowHeight(0), gameOver(false)
+          window(0), windowWidth(0), windowHeight(0), gameOver(false),
+          lionTexture(0), lionTextureLoaded(false)
     {
         levels = {
             {{"########################################",
@@ -43,7 +44,7 @@ public:
               "#.#.........#.#.#.........#.....#...E.#",
               "########################################"}},
             {{"########################################",
-              "#S.....#..B................#...........#",
+              "#S.....#..B............................#",
               "#.###..#.####.#######.#####.#.#######..#",
               "#...#..#....#.......#.....#.#.....#....#",
               "###.#.###.###.#####.#####.#.###.#.###..#",
@@ -109,8 +110,6 @@ public:
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glClearColor(0, 0, 0, 1);
-        // try loading the lion texture now that the GL context exists
-        loadLionTexture();
         lastTime = clockNow();
         glutMainLoop();
     }
@@ -204,10 +203,9 @@ private:
         playerTrail.clear();
         animalActive = false;
         animalSpawnTimer = 0.0f;
-        animalSpawnDelay = 2.0f; // spawn 2s after human starts
+        animalSpawnDelay = 3.0f; // spawn 3s after human starts (delayed by +1s)
         animalGrid = {-1, -1};
-        // ensure animal position float is initialized to fallback patrol coords
-        animalPosF = {animalStartX, animalY};
+        animalPosF = {animalX, animalY};
         animalTargetGrid = {-1, -1};
         animalMoving = false;
         animalMoveSpeed = moveSpeed * 0.9f; // slightly slower than player
@@ -285,9 +283,56 @@ private:
                 timeStarted = true;
                 animalMoveSpeed = moveSpeed * 0.9f; // slightly slower than player
 
-                // ensure texture has been attempted to load
+                // try to load lion texture (one-time)
                 if (!lionTextureLoaded)
-                    loadLionTexture();
+                {
+                    lionTextureLoaded = false;
+                    std::string texPath = "lion.bmp";
+                    std::ifstream f(texPath, std::ios::binary);
+                    if (f)
+                    {
+                        // naive BMP loader for 24-bit BMP
+                        f.seekg(0, std::ios::end);
+                        size_t size = (size_t)f.tellg();
+                        f.seekg(0);
+                        std::vector<unsigned char> data(size);
+                        f.read((char *)data.data(), size);
+                        // check header
+                        if (data.size() > 54 && data[0] == 'B' && data[1] == 'M')
+                        {
+                            int w = *(int *)&data[18];
+                            int h = *(int *)&data[22];
+                            int offset = *(int *)&data[10];
+                            int bpp = *(short *)&data[28];
+                            if (bpp == 24)
+                            {
+                                // create GL texture
+                                glGenTextures(1, &lionTexture);
+                                glBindTexture(GL_TEXTURE_2D, lionTexture);
+                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                                // BMP is BGR, bottom-up rows
+                                std::vector<unsigned char> img(w * h * 3);
+                                int rowSize = ((w * 3 + 3) / 4) * 4;
+                                for (int y = 0; y < h; ++y)
+                                {
+                                    int srcRow = offset + (h - 1 - y) * rowSize;
+                                    memcpy(&img[y * w * 3], &data[srcRow], w * 3);
+                                }
+                                // convert BGR -> RGB since GL_BGR may not be available
+                                for (int pi = 0; pi < w * h; ++pi)
+                                {
+                                    unsigned char b = img[pi * 3 + 0];
+                                    unsigned char r = img[pi * 3 + 2];
+                                    img[pi * 3 + 0] = r;
+                                    img[pi * 3 + 2] = b;
+                                }
+                                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, img.data());
+                                lionTextureLoaded = true;
+                            }
+                        }
+                    }
+                }
             }
 
             if (key == GLUT_KEY_UP)
@@ -314,7 +359,6 @@ private:
                 if (!humanRunning && playerTrail.empty())
                 {
                     humanRunning = true;
-                    timeStarted = true;      // start the level timer once player moves
                     animalSpawnTimer = 0.0f; // start counting to spawn
                 }
                 moving = true;
@@ -343,10 +387,6 @@ private:
             {
                 // activate animal: position it at the player's start or off-left if unknown
                 animalActive = true;
-                // spawn the animal near the player's current position so it's visible
-                animalPosF.first = playerPos.first - tileSize * 0.0f;   // same x
-                animalPosF.second = playerPos.second - tileSize * 0.0f; // same y
-                std::cout << "[DEBUG] Lion spawned near player at pixel: (" << animalPosF.first << ", " << animalPosF.second << ")\n";
                 // prefer spawning at maze 'S' position: use the first trail element if available
                 if (!playerTrail.empty())
                 {
@@ -447,13 +487,13 @@ private:
             float dx = ax - playerPos.first;
             float dy = ay - playerPos.second;
             float dist2 = dx * dx + dy * dy;
-            float catchRadius = tileSize * 0.7f;
+            float catchRadius = tileSize * 0.5f;
             if (dist2 <= catchRadius * catchRadius)
             {
                 caughtByAnimal = true;
                 gameOver = true;
                 levelFailed = true;
-                std::cout << "Caught by the lion!\n";
+                std::cout << "Caught by the animal!\n";
             }
         }
 
@@ -547,45 +587,31 @@ private:
         drawRectFilled(cx + size * 0.07f + phase * 3.0f, cy + size * 0.15f, size * 0.08f, legLen);
     }
 
-    // Draw a simple lion that's clearly visible
-    void drawLion(float cx, float cy, float scale = 1.0f)
+    // Draw a simple animal (dog-like) as a rectangle body and circle head, moves along X
+    void drawAnimal(float ax, float ay, float scale = 0.6f)
     {
-        float size = tileSize * scale;
+        // drop shadow
+        glColor4f(0, 0, 0, 0.25f);
+        drawRectFilled(ax - tileSize * scale * 0.5f, ay + tileSize * scale * 0.35f, tileSize * scale, tileSize * 0.12f);
 
-        // Body - main golden part
-        glColor3ub(210, 150, 50);
-        drawRectFilled(cx - size * 0.3f, cy - size * 0.2f, size * 0.6f, size * 0.4f);
+        float bodyW = tileSize * scale;
+        float bodyH = tileSize * 0.42f * scale;
+        // body with gradient-like effect
+        glColor3ub(180, 110, 60);
+        drawRectFilled(ax - bodyW / 2.0f, ay - bodyH / 2.0f, bodyW, bodyH);
+        glColor3ub(140, 80, 40);
+        drawRectFilled(ax - bodyW / 2.0f, ay - bodyH / 2.0f, bodyW * 0.4f, bodyH);
 
-        // Head
-        glColor3ub(210, 150, 50);
-        drawCircleFilled(cx + size * 0.25f, cy, size * 0.25f, 16);
+        // head with a lighter forehead
+        glColor3ub(120, 70, 30);
+        drawCircleFilled(ax + bodyW * 0.46f, ay - bodyH * 0.18f, bodyH * 0.6f, 16);
+        glColor3ub(160, 100, 60);
+        drawCircleFilled(ax + bodyW * 0.5f, ay - bodyH * 0.22f, bodyH * 0.22f, 8); // snout highlight
 
-        // Mane - dark brown around head
-        glColor3ub(150, 100, 30);
-        drawCircleFilled(cx + size * 0.25f, cy, size * 0.35f, 16);
-
-        // Face - draw on top of mane
-        glColor3ub(210, 150, 50);
-        drawCircleFilled(cx + size * 0.25f, cy, size * 0.2f, 16);
-
-        // Eyes
-        glColor3ub(0, 0, 0);
-        drawCircleFilled(cx + size * 0.35f, cy - size * 0.05f, size * 0.05f, 8);
-
-        // Nose
-        glColor3ub(0, 0, 0);
-        drawCircleFilled(cx + size * 0.4f, cy + size * 0.05f, size * 0.04f, 6);
-
-        // Legs - four simple rectangles
-        glColor3ub(150, 100, 30);
-        drawRectFilled(cx - size * 0.25f, cy + size * 0.2f, size * 0.1f, size * 0.3f);
-        drawRectFilled(cx - size * 0.05f, cy + size * 0.2f, size * 0.1f, size * 0.3f);
-        drawRectFilled(cx + size * 0.15f, cy + size * 0.2f, size * 0.1f, size * 0.3f);
-        drawRectFilled(cx + size * 0.35f, cy + size * 0.2f, size * 0.1f, size * 0.3f);
-
-        // Tail
-        glColor3ub(150, 100, 30);
-        drawRectFilled(cx - size * 0.4f, cy - size * 0.1f, size * 0.3f, size * 0.05f);
+        // legs (simple)
+        glColor3ub(90, 50, 30);
+        drawRectFilled(ax - bodyW * 0.33f, ay + bodyH / 2.0f, bodyW * 0.12f, bodyH * 0.9f);
+        drawRectFilled(ax + bodyW * 0.03f, ay + bodyH / 2.0f, bodyW * 0.12f, bodyH * 0.9f);
     }
 
     // draw a textured quad centered at cx,cy with width w and height h
@@ -595,7 +621,6 @@ private:
             return;
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, tex);
-        glColor3ub(255, 255, 255); // Reset color to white for texture
         glBegin(GL_QUADS);
         glTexCoord2f(0, 1);
         glVertex2f(cx - w / 2, cy - h / 2);
@@ -607,61 +632,6 @@ private:
         glVertex2f(cx - w / 2, cy + h / 2);
         glEnd();
         glDisable(GL_TEXTURE_2D);
-    }
-
-    // centralized loader for lion.bmp (naive 24-bit BMP parser)
-    void loadLionTexture()
-    {
-        if (lionTextureLoaded)
-            return;
-        std::string texPath = "lion.bmp";
-        std::ifstream f(texPath, std::ios::binary);
-        if (!f)
-        {
-            std::cout << "[DEBUG] Could not open lion.bmp file - using drawn lion instead\n";
-            return;
-        }
-        f.seekg(0, std::ios::end);
-        size_t size = (size_t)f.tellg();
-        f.seekg(0);
-        std::vector<unsigned char> data(size);
-        f.read((char *)data.data(), size);
-        if (data.size() <= 54 || data[0] != 'B' || data[1] != 'M')
-        {
-            std::cout << "[DEBUG] Invalid BMP file - using drawn lion instead\n";
-            return;
-        }
-        int w = *(int *)&data[18];
-        int h = *(int *)&data[22];
-        int offset = *(int *)&data[10];
-        int bpp = *(short *)&data[28];
-        if (bpp != 24)
-        {
-            std::cout << "[DEBUG] BMP must be 24-bit - using drawn lion instead\n";
-            return;
-        }
-        glGenTextures(1, &lionTexture);
-        glBindTexture(GL_TEXTURE_2D, lionTexture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        std::vector<unsigned char> img(w * h * 3);
-        int rowSize = ((w * 3 + 3) / 4) * 4;
-        for (int y = 0; y < h; ++y)
-        {
-            int srcRow = offset + (h - 1 - y) * rowSize;
-            memcpy(&img[y * w * 3], &data[srcRow], w * 3);
-        }
-        // convert BGR -> RGB
-        for (int pi = 0; pi < w * h; ++pi)
-        {
-            unsigned char b = img[pi * 3 + 0];
-            unsigned char r = img[pi * 3 + 2];
-            img[pi * 3 + 0] = r;
-            img[pi * 3 + 2] = b;
-        }
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, img.data());
-        lionTextureLoaded = true;
-        std::cout << "[DEBUG] Loaded lion texture: " << w << "x" << h << "\n";
     }
 
     void drawText(const std::string &s, float x, float y)
@@ -716,7 +686,7 @@ private:
 
                     if (c == 'B')
                     {
-                        // pulsing ball for bonus items
+                        // pulsing
                         float pulse = 1.0f + 0.15f * sinf(levelElapsed * 6.0f);
                         float r = (tileSize * 0.25f) * pulse;
                         glColor3ub(200, 180, 0);
@@ -731,27 +701,19 @@ private:
             }
         }
 
-        // DEBUG: Always draw the lion position marker when active
+        // draw background animal (behind player) only when active (or faintly hidden before)
         if (animalActive)
         {
-            // Draw a bright red circle to mark the lion's position for debugging
-            glColor3ub(255, 0, 0);
-            drawCircleFilled(animalPosF.first, animalPosF.second, 8.0f, 16);
-
-            // Now draw the actual lion
             if (lionTextureLoaded)
             {
-                float aw = tileSize * 1.2f;
-                float ah = tileSize * 1.2f;
-                drawTexturedQuad(lionTexture, animalPosF.first, animalPosF.second, aw, ah);
+                float aw = tileSize * 1.0f;
+                float ah = tileSize * 1.0f;
+                drawTexturedQuad(lionTexture, animalPosF.first, animalPosF.second - tileSize * 0.1f, aw, ah);
             }
             else
             {
-                // Draw a lion instead of a ball - make it larger and more visible
-                drawLion(animalPosF.first, animalPosF.second, 1.0f);
+                drawAnimal(animalPosF.first, animalPosF.second, 0.6f);
             }
-
-            std::cout << "[DEBUG] Drawing lion at: (" << animalPosF.first << ", " << animalPosF.second << ")\n";
         }
 
         // draw player as a simple human with bobbing
@@ -781,7 +743,7 @@ private:
             std::string msg;
             if (caughtByAnimal)
             {
-                msg = "CAUGHT! The lion got you. Press R to restart or Q to quit";
+                msg = "CAUGHT! The animal got you. Press R to restart or Q to quit";
             }
             else if ((int)levelElapsed >= levelTimeLimit)
             {
