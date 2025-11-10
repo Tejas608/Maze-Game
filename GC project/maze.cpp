@@ -198,6 +198,7 @@ private:
         runPhase = 0.0f;
         caughtByAnimal = false;
         levelFailed = false;
+        // do not start the timer immediately on restart; start when player first moves
         timeStarted = false;
         // chasing/trail init
         playerTrail.clear();
@@ -359,6 +360,8 @@ private:
                 if (!humanRunning && playerTrail.empty())
                 {
                     humanRunning = true;
+                    // start the level timer when the player makes their first intentional move (WASD)
+                    timeStarted = true;
                     animalSpawnTimer = 0.0f; // start counting to spawn
                 }
                 moving = true;
